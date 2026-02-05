@@ -5,73 +5,39 @@ APP_NAME="gpio-keyboard"
 INSTALL_DIR="/opt/rpi-gpio-keyboard-c"
 SERVICE_FILE="gpio-keyboard.service"
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 echo "======================================="
-echo " GPIO Keyboard – Otomatik Kurulum"
+echo " GPIO Keyboard - Otomatik Kurulum"
 echo "======================================="
 
-# 1. ROOT KONTROLÜ
-if [[ $EUID -ne 0 ]]; then
-  echo "❌ Lütfen root olarak çalıştırın:"
-  echo "   sudo ./install.sh"
+if [ "$EUID" -ne 0 ]; then
+  echo "Lütfen root olarak çalıştırın:"
+  echo "sudo bash install.sh"
   exit 1
 fi
 
-# 2. SİSTEM BİLGİSİ
-echo "[1/8] Sistem kontrolü"
-grep -q "Raspberry Pi" /proc/device-tree/model || {
-  echo "⚠️ Raspberry Pi tespit edilemedi, devam ediliyor..."
-}
+echo "[1/7] Gerekli paketler"
+apt update
+apt install -y git gcc make
 
-# 3. GEREKLİ PAKETLER
-echo "[2/8] Gerekli paketler kontrol ediliyor"
+echo "[2/7] uinput modülü"
+modprobe uinput
+echo uinput > /etc/modules-load.d/uinput.conf
 
-REQUIRED_PKGS=(git gcc make)
-
-MISSING_PKGS=()
-for pkg in "${REQUIRED_PKGS[@]}"; do
-  if ! dpkg -s "$pkg" &>/dev/null; then
-    MISSING_PKGS+=("$pkg")
-  fi
-done
-
-if [ ${#MISSING_PKGS[@]} -ne 0 ]; then
-  echo "→ Eksik paketler kuruluyor: ${MISSING_PKGS[*]}"
-  apt update
-  apt install -y "${MISSING_PKGS[@]}"
-else
-  echo "✓ Tüm paketler mevcut"
-fi
-
-# 4. uinput MODÜLÜ
-echo "[3/8] uinput modülü kontrolü"
-
-if ! lsmod | grep -q uinput; then
-  modprobe uinput
-fi
-
-if ! grep -q "^uinput$" /etc/modules-load.d/uinput.conf 2>/dev/null; then
-  echo "uinput" > /etc/modules-load.d/uinput.conf
-fi
-
-# 5. DOSYALARI KOPYALA
-echo "[4/8] Dosyalar kopyalanıyor"
-
+echo "[3/7] Dosyalar kopyalanıyor"
 mkdir -p "$INSTALL_DIR"
-cp -r src Makefile "$INSTALL_DIR"
+cp -r "$SCRIPT_DIR/src" "$SCRIPT_DIR/Makefile" "$INSTALL_DIR"
+
 cd "$INSTALL_DIR"
 
-# 6. DERLEME
-echo "[5/8] Derleniyor"
-
+echo "[4/7] Derleme"
 make clean || true
 make
-
 chmod +x gpio_keyboard
 
-# 7. SYSTEMD SERVİSİ
-echo "[6/8] systemd servisi kuruluyor"
-
-cp "$(dirname "$0")/systemd/$SERVICE_FILE" /etc/systemd/system/
+echo "[5/7] systemd servisi kuruluyor"
+cp "$SCRIPT_DIR/systemd/$SERVICE_FILE" /etc/systemd/system/
 
 sed -i "s|ExecStart=.*|ExecStart=$INSTALL_DIR/gpio_keyboard|" \
   /etc/systemd/system/$SERVICE_FILE
@@ -80,9 +46,7 @@ systemctl daemon-reload
 systemctl enable $APP_NAME
 systemctl restart $APP_NAME
 
-# 8. DURUM
-echo "[7/8] Servis durumu"
+echo "[6/7] Servis durumu"
 systemctl status $APP_NAME --no-pager
 
-echo "[8/8] Kurulum tamamlandı ✅"
-echo "Reboot sonrası otomatik çalışacaktır."
+echo "[7/7] Kurulum tamamlandı"
