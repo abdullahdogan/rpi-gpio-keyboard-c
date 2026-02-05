@@ -26,7 +26,12 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
-
+**Update**
+```
+cd ~/rpi-gpio-keyboard-c
+git pull
+sudo bash install.sh
+```
 
 
 
