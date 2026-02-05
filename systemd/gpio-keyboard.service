@@ -1,11 +1,12 @@
 [Unit]
-Description=GPIO Keyboard Emulator (C)
+Description=GPIO Keyboard Emulator (C/libgpiod)
 After=multi-user.target
 
 [Service]
 Type=simple
 ExecStart=/opt/rpi-gpio-keyboard-c/gpio_keyboard
 Restart=always
+RestartSec=1
 User=root
 
 [Install]
