@@ -56,7 +56,7 @@ static const char *GPIOCHIP_PATH = "/dev/gpiochip0";
    - Typical mechanical buttons: 20-80ms
    - If you still see double triggers, try 150-300ms
 */
-static const long long DEBOUNCE_MS = 120;
+static const long long DEBOUNCE_MS = 80;
 
 static int ufd = -1;
 static struct gpiod_chip *chip = NULL;
