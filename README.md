@@ -19,12 +19,13 @@ sudo systemctl enable gpio-keyboard
 
 ```
 **Hızlı Kurulum (Raspberry Pi CM5)**
-bash
+```bash
 git clone https://github.com/KULLANICI_ADI/rpi-gpio-keyboard-c.git
 cd rpi-gpio-keyboard-c
 chmod +x install.sh
 sudo ./install.sh
 ```
+
 
 
 
