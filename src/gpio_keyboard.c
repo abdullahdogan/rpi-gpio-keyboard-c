@@ -45,8 +45,8 @@ static map_t MAPS[] = {
     {27, KEY_ESC,   {0}, 0, "GPIO27->ESC",   0, 0},
     {25, KEY_UP,    {0}, 0, "GPIO25->UP",    0, 0},
     {6, KEY_DOWN,  {0}, 0, "GPIO6->DOWN",  0, 0},
-    {25, KEY_LEFT,    {0}, 0, "GPIO25->LEFT",    0, 0},
-    {6, KEY_RIGHT,  {0}, 0, "GPIO6->RIGHT",  0, 0},
+    {3, KEY_LEFT,    {0}, 0, "GPIO3->LEFT",    0, 0},
+    {7, KEY_RIGHT,  {0}, 0, "GPIO7->RIGHT",  0, 0},
 };
 /* ========================================================= */
 
