@@ -9,9 +9,16 @@ Linux sanal klavye tuşlarına çevirir.
 - systemd ile açılışta başlar
 - Wayland / X11 bağımsız
 
-## Kurulum
+## Kurulum 
 ```bash
 git clone https://github.com/KULLANICI_ADI/rpi-gpio-keyboard-c.git
 cd rpi-gpio-keyboard-c
 make
+
 sudo systemctl enable gpio-keyboard
+## Hızlı Kurulum (Raspberry Pi CM5)
+```bash
+git clone https://github.com/KULLANICI_ADI/rpi-gpio-keyboard-c.git
+cd rpi-gpio-keyboard-c
+chmod +x install.sh
+sudo ./install.sh
