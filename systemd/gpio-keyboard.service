@@ -3,7 +3,8 @@ Description=GPIO Keyboard Emulator (C)
 After=multi-user.target
 
 [Service]
-ExecStart=/home/pmroot/rpi-gpio-keyboard-c/gpio_keyboard
+Type=simple
+ExecStart=/opt/rpi-gpio-keyboard-c/gpio_keyboard
 Restart=always
 User=root
 
