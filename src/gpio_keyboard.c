@@ -51,7 +51,7 @@ static map_t MAPS[] = {
 /* ========================================================= */
 
 static const long long EDGE_DEBOUNCE_MS = 10;   // short edge filter
-static const long long PRESS_MIN_MS     = 100;  // accept press if held >= 100ms
+static const long long PRESS_MIN_MS     = 200;  // accept press if held >= 100ms
 static const long long STUCK_RELEASE_MS = 2000; // safety: if no rising arrives
 
 static const char *GPIOCHIP_PATH = "/dev/gpiochip0";
