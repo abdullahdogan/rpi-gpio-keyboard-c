@@ -45,8 +45,8 @@ static const char *GPIOCHIP_PATH = "/dev/gpiochip0";
   - If double-press: increase DEBOUNCE_FALL_MS (30->60) and/or DEBOUNCE_RISE_MS (20->60)
   - If missed presses: reduce DEBOUNCE_FALL_MS (30->15)
 */
-static const long long DEBOUNCE_FALL_MS = 30;
-static const long long DEBOUNCE_RISE_MS = 30;
+static const long long DEBOUNCE_FALL_MS = 50;
+static const long long DEBOUNCE_RISE_MS = 50;
 
 /* Ignore very fast fake release right after press (bounce). */
 static const long long MIN_PRESS_MS = 15;
