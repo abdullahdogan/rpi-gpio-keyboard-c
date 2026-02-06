@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -12,49 +13,51 @@
 #include <linux/uinput.h>
 #include <gpiod.h>
 
-#define MAX_MODS 4
-#define MAX_EVENTS 64
-
 /*
-  libgpiod + uinput GPIO keyboard
-  - Edge BOTH (falling/rising)
-  - Press is accepted only if LOW duration >= PRESS_MIN_MS
-  - Key is emitted on RISING (release) after duration check
-  - Filters short glitches when charger is plugged in
+  GPIO -> Keyboard (uinput) using libgpiod (no /sys/class/gpio).
+  - Uses BOTH edges and per-line state to prevent double press (bounce).
+  - Optional modifier keys (CTRL/ALT/SHIFT) per mapping.
 
-  Wiring assumption (active-low):
-    Button between GPIO and GND
-    Pull-up enabled (internal bias + optional external 4.7k/10k recommended)
+  Wiring recommendation (active-low):
+  - Button between GPIO and GND
+  - Enable pull-up (internal bias + optional external 10k to 3.3V)
 */
 
+#define MAX_MODS 4
+
 typedef struct {
-    unsigned int offset;          // gpiochip line offset (BCM on gpiochip0)
-    int keycode;                  // main keycode
-    int mods[MAX_MODS];           // modifier keys (optional)
+    unsigned int offset;          // gpiochip0 line offset (BCM)
+    int keycode;                  // main key
+    int mods[MAX_MODS];           // modifiers (optional)
     int nmods;
     const char *name;
 
-    long long last_edge_ms;       // debounce for edges
-    long long press_start_ms;     // time when falling happened
-    int pressed;                  // 0 released, 1 pressed (latched)
+    long long last_ms;            // software debounce timestamp
+    int pressed;                  // state: 0 released, 1 pressed (latched)
 } map_t;
 
 /* ===================== USER MAPPING ===================== */
+/* Change offsets / keys / combos here. Examples:
+   - Single key: {17, KEY_ENTER, {0}, 0, "GPIO17->ENTER", 0, 0}
+   - Combo: CTRL+L: {17, KEY_L, {KEY_LEFTCTRL}, 1, "GPIO17->CTRL+L", 0, 0}
+*/
 static map_t MAPS[] = {
-    {5,  KEY_ENTER, {0}, 0, "GPIO5->ENTER",   0, 0, 0},
-    {27, KEY_ESC,   {0}, 0, "GPIO27->ESC",    0, 0, 0},
-    {25, KEY_UP,    {0}, 0, "GPIO25->UP",     0, 0, 0},
-    {6,  KEY_DOWN,  {0}, 0, "GPIO6->DOWN",    0, 0, 0},
-    {3,  KEY_LEFT,  {0}, 0, "GPIO3->LEFT",    0, 0, 0},
-    {7,  KEY_RIGHT, {0}, 0, "GPIO7->RIGHT",   0, 0, 0},
+    {5, KEY_ENTER, {0}, 0, "GPIO5->ENTER", 0, 0},
+    {27, KEY_ESC,   {0}, 0, "GPIO27->ESC",   0, 0},
+    {25, KEY_UP,    {0}, 0, "GPIO25->UP",    0, 0},
+    {6, KEY_DOWN,  {0}, 0, "GPIO6->DOWN",  0, 0},
+    {3, KEY_LEFT,    {0}, 0, "GPIO3->LEFT",    0, 0},
+    {7, KEY_RIGHT,  {0}, 0, "GPIO7->RIGHT",  0, 0},
 };
 /* ========================================================= */
 
-static const long long EDGE_DEBOUNCE_MS = 10;   // short edge filter
-static const long long PRESS_MIN_MS     = 200;  // accept press if held >= 100ms
-static const long long STUCK_RELEASE_MS = 2000; // safety: if no rising arrives
-
 static const char *GPIOCHIP_PATH = "/dev/gpiochip0";
+
+/* Debounce window in ms.
+   - Typical mechanical buttons: 20-80ms
+   - If you still see double triggers, try 150-300ms
+*/
+static const long long DEBOUNCE_MS = 50;
 
 static int ufd = -1;
 static struct gpiod_chip *chip = NULL;
@@ -85,16 +88,16 @@ static void uinput_sync(void) {
 }
 
 static void emit_mapping(const map_t *m) {
-    // modifiers down
+    // Press modifiers
     for (int i = 0; i < m->nmods; i++) {
         uinput_emit_key(m->mods[i], 1);
     }
 
-    // click main key
+    // Click main key
     uinput_emit_key(m->keycode, 1);
     uinput_emit_key(m->keycode, 0);
 
-    // modifiers up
+    // Release modifiers (reverse order)
     for (int i = m->nmods - 1; i >= 0; i--) {
         uinput_emit_key(m->mods[i], 0);
     }
@@ -120,6 +123,7 @@ static void cleanup(int sig) {
         gpiod_chip_close(chip);
         chip = NULL;
     }
+
     if (ufd >= 0) {
         ioctl(ufd, UI_DEV_DESTROY);
         close(ufd);
@@ -136,19 +140,19 @@ static int setup_uinput(void) {
     }
 
     if (ioctl(ufd, UI_SET_EVBIT, EV_KEY) < 0) {
-        perror("UI_SET_EVBIT");
+        perror("ioctl UI_SET_EVBIT");
         return -1;
     }
 
-    // enable keybits: main + modifiers
+    // Enable all keys used: main + modifiers
     for (int i = 0; i < (int)(sizeof(MAPS) / sizeof(MAPS[0])); i++) {
         if (ioctl(ufd, UI_SET_KEYBIT, MAPS[i].keycode) < 0) {
-            perror("UI_SET_KEYBIT main");
+            perror("ioctl UI_SET_KEYBIT main");
             return -1;
         }
         for (int j = 0; j < MAPS[i].nmods; j++) {
             if (ioctl(ufd, UI_SET_KEYBIT, MAPS[i].mods[j]) < 0) {
-                perror("UI_SET_KEYBIT mod");
+                perror("ioctl UI_SET_KEYBIT mod");
                 return -1;
             }
         }
@@ -163,11 +167,11 @@ static int setup_uinput(void) {
     us.id.version = 1;
 
     if (ioctl(ufd, UI_DEV_SETUP, &us) < 0) {
-        perror("UI_DEV_SETUP");
+        perror("ioctl UI_DEV_SETUP");
         return -1;
     }
     if (ioctl(ufd, UI_DEV_CREATE) < 0) {
-        perror("UI_DEV_CREATE");
+        perror("ioctl UI_DEV_CREATE");
         return -1;
     }
 
@@ -191,10 +195,12 @@ static int setup_gpiod_request(void) {
     }
 
     gpiod_request_config_set_consumer(rcfg, "gpio-keyboard");
+
     gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_INPUT);
     gpiod_line_settings_set_edge_detection(settings, GPIOD_LINE_EDGE_BOTH);
 
-    // internal pull-up to reduce floating/glitch
+    // Internal pull-up bias: helps against floating inputs
+    // If your hardware already has external pull-up, this still OK.
     gpiod_line_settings_set_bias(settings, GPIOD_LINE_BIAS_PULL_UP);
 
     unsigned int offsets[sizeof(MAPS) / sizeof(MAPS[0])];
@@ -226,7 +232,6 @@ static int setup_gpiod_request(void) {
 
 int main(int argc, char **argv) {
     bool debug = false;
-
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--debug") == 0) debug = true;
         if (strcmp(argv[i], "--chip") == 0 && i + 1 < argc) {
@@ -254,36 +259,21 @@ int main(int argc, char **argv) {
     }
 
     struct pollfd pfd = { .fd = gfd, .events = POLLIN };
-    struct gpiod_edge_event_buffer *buf = gpiod_edge_event_buffer_new(MAX_EVENTS);
+    struct gpiod_edge_event_buffer *buf = gpiod_edge_event_buffer_new(64);
     if (!buf) {
         fprintf(stderr, "gpiod_edge_event_buffer_new failed\n");
         return 1;
     }
 
     while (1) {
-        // timeout poll to run STUCK_RELEASE safety
-        int pr = poll(&pfd, 1, 50);
-        long long now = now_ms();
-
-        // safety: if rising never comes, unlock after STUCK_RELEASE_MS
-        for (int k = 0; k < (int)(sizeof(MAPS) / sizeof(MAPS[0])); k++) {
-            if (MAPS[k].pressed && (now - MAPS[k].press_start_ms > STUCK_RELEASE_MS)) {
-                MAPS[k].pressed = 0;
-                if (debug) {
-                    fprintf(stdout, "STUCK release -> offset %u\n", MAPS[k].offset);
-                    fflush(stdout);
-                }
-            }
-        }
-
+        int pr = poll(&pfd, 1, -1);
         if (pr < 0) {
             if (errno == EINTR) continue;
             perror("poll");
             break;
         }
-        if (pr == 0) continue; // timeout
 
-        int rd = gpiod_line_request_read_edge_events(req, buf, MAX_EVENTS);
+        int rd = gpiod_line_request_read_edge_events(req, buf, 64);
         if (rd < 0) {
             perror("read_edge_events");
             continue;
@@ -293,40 +283,41 @@ int main(int argc, char **argv) {
             const struct gpiod_edge_event *ev = gpiod_edge_event_buffer_get_event(buf, i);
             unsigned int off = gpiod_edge_event_get_line_offset(ev);
             enum gpiod_edge_event_type et = gpiod_edge_event_get_event_type(ev);
-            long long t = now_ms();
 
             int idx = map_index_from_offset(off);
             if (idx < 0) continue;
 
-            // edge debounce
-            if (t - MAPS[idx].last_edge_ms < EDGE_DEBOUNCE_MS) continue;
-            MAPS[idx].last_edge_ms = t;
+            long long t = now_ms();
+            if (t - MAPS[idx].last_ms < DEBOUNCE_MS) continue;
+            MAPS[idx].last_ms = t;
 
             if (et == GPIOD_EDGE_EVENT_FALLING_EDGE) {
+                // Press (active-low). Only trigger once until release.
                 if (!MAPS[idx].pressed) {
                     MAPS[idx].pressed = 1;
-                    MAPS[idx].press_start_ms = t;
                     if (debug) {
-                        fprintf(stdout, "FALL %u start\n", off);
+                        fprintf(stdout, "FALLING on %u -> %s\n", off, MAPS[idx].name);
+                        fflush(stdout);
+                    }
+                    emit_mapping(&MAPS[idx]);
+                } else {
+                    if (debug) {
+                        fprintf(stdout, "FALLING ignored (already pressed) on %u\n", off);
                         fflush(stdout);
                     }
                 }
             } else if (et == GPIOD_EDGE_EVENT_RISING_EDGE) {
+                // Release
                 if (MAPS[idx].pressed) {
-                    long long dur = t - MAPS[idx].press_start_ms;
                     MAPS[idx].pressed = 0;
-
-                    if (dur >= PRESS_MIN_MS) {
-                        if (debug) {
-                            fprintf(stdout, "RISE %u dur=%lldms -> EMIT %s\n", off, dur, MAPS[idx].name);
-                            fflush(stdout);
-                        }
-                        emit_mapping(&MAPS[idx]);
-                    } else {
-                        if (debug) {
-                            fprintf(stdout, "RISE %u dur=%lldms -> IGNORE\n", off, dur);
-                            fflush(stdout);
-                        }
+                    if (debug) {
+                        fprintf(stdout, "RISING  on %u (release)\n", off);
+                        fflush(stdout);
+                    }
+                } else {
+                    if (debug) {
+                        fprintf(stdout, "RISING ignored (already released) on %u\n", off);
+                        fflush(stdout);
                     }
                 }
             }
