@@ -26,15 +26,22 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
-**Update**
+**Güncelle**
 ```
 cd ~/rpi-gpio-keyboard-c
 git pull
 sudo bash install.sh
 ```
 
+**Lokal değişikleri Sil ve Güncelle**
+```
+cd ~/rpi-gpio-keyboard-c
+git fetch origin
+git reset --hard origin/main
 
-
+sudo bash install.sh
+sudo systemctl restart gpio-keyboard
+```
 
 
 
