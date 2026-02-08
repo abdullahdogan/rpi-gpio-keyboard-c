@@ -1,3 +1,4 @@
+// src/gpio_keyboard.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -13,6 +14,7 @@
 #include <gpiod.h>
 
 #define MAX_MODS 4
+#define MAX_EVENTS 64
 
 typedef struct {
     unsigned int offset;          // gpiochip0 line offset (BCM)
@@ -25,16 +27,21 @@ typedef struct {
     long long last_rise_ms;       // debounce for rising
     long long pressed_ms;         // when we latched pressed=1
     int pressed;                  // 0 released, 1 pressed (latched)
+
+    // Charger noise fix: don't immediately accept RISING as release.
+    // Mark "release pending" and only accept if stable for RELEASE_STABLE_MS.
+    long long rise_candidate_ms;
+    int release_pending;
 } map_t;
 
 /* ===================== USER MAPPING ===================== */
 static map_t MAPS[] = {
-    {5,  KEY_ENTER, {0}, 0, "GPIO5->ENTER", 0, 0, 0, 0},
-    {27, KEY_ESC,   {0}, 0, "GPIO27->ESC",  0, 0, 0, 0},
-    {25, KEY_UP,    {0}, 0, "GPIO25->UP",   0, 0, 0, 0},
-    {6,  KEY_DOWN,  {0}, 0, "GPIO6->DOWN",  0, 0, 0, 0},
-    {3,  KEY_LEFT,  {0}, 0, "GPIO3->LEFT",  0, 0, 0, 0},
-    {7,  KEY_RIGHT, {0}, 0, "GPIO7->RIGHT", 0, 0, 0, 0},
+    {5,  KEY_ENTER, {0}, 0, "GPIO5->ENTER", 0, 0, 0, 0, 0, 0},
+    {27, KEY_ESC,   {0}, 0, "GPIO27->ESC",  0, 0, 0, 0, 0, 0},
+    {25, KEY_UP,    {0}, 0, "GPIO25->UP",   0, 0, 0, 0, 0, 0},
+    {6,  KEY_DOWN,  {0}, 0, "GPIO6->DOWN",  0, 0, 0, 0, 0, 0},
+    {3,  KEY_LEFT,  {0}, 0, "GPIO3->LEFT",  0, 0, 0, 0, 0, 0},
+    {7,  KEY_RIGHT, {0}, 0, "GPIO7->RIGHT", 0, 0, 0, 0, 0, 0},
 };
 /* ========================================================= */
 
@@ -42,14 +49,23 @@ static const char *GPIOCHIP_PATH = "/dev/gpiochip0";
 
 /*
   Debounce tuning:
-  - If double-press: increase DEBOUNCE_FALL_MS (30->60) and/or DEBOUNCE_RISE_MS (20->60)
-  - If missed presses: reduce DEBOUNCE_FALL_MS (30->15)
+  - If double-press: increase DEBOUNCE_FALL_MS and/or DEBOUNCE_RISE_MS
+  - If missed presses: reduce DEBOUNCE_FALL_MS
 */
-static const long long DEBOUNCE_FALL_MS = 50;
-static const long long DEBOUNCE_RISE_MS = 50;
+static const long long DEBOUNCE_FALL_MS = 30;
+static const long long DEBOUNCE_RISE_MS = 30;
 
 /* Ignore very fast fake release right after press (bounce). */
 static const long long MIN_PRESS_MS = 15;
+
+/*
+  Charger noise fix:
+  - When a RISING edge happens, don't instantly treat it as release.
+  - Accept release only if we see no new FALLING for RELEASE_STABLE_MS.
+*/
+static const long long RELEASE_STABLE_MS_DEFAULT = 30;
+static const long long RELEASE_STABLE_MS_GPIO6   = 80;  // stricter for noisy GPIO6
+static const int       POLL_TIMEOUT_MS           = 20;  // tick for pending release checks
 
 static int ufd = -1;
 static struct gpiod_chip *chip = NULL;
@@ -59,6 +75,10 @@ static long long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
+static long long release_stable_ms_for_offset(unsigned int off) {
+    return (off == 6) ? RELEASE_STABLE_MS_GPIO6 : RELEASE_STABLE_MS_DEFAULT;
 }
 
 static void uinput_emit_key(int key, int value) {
@@ -192,18 +212,36 @@ int main(int argc, char **argv) {
     if (gfd < 0) { fprintf(stderr, "gpiod_line_request_get_fd failed\n"); return 1; }
 
     struct pollfd pfd = { .fd = gfd, .events = POLLIN };
-    struct gpiod_edge_event_buffer *buf = gpiod_edge_event_buffer_new(64);
+    struct gpiod_edge_event_buffer *buf = gpiod_edge_event_buffer_new(MAX_EVENTS);
     if (!buf) { fprintf(stderr, "gpiod_edge_event_buffer_new failed\n"); return 1; }
 
     while (1) {
-        int pr = poll(&pfd, 1, -1);
-        if (pr < 0) { if (errno == EINTR) continue; perror("poll"); break; }
+        int pr = poll(&pfd, 1, POLL_TIMEOUT_MS);
+        long long now = now_ms();
 
-        int rd = gpiod_line_request_read_edge_events(req, buf, 64);
+        // Complete pending releases if stable for enough time
+        for (int k = 0; k < (int)(sizeof(MAPS) / sizeof(MAPS[0])); k++) {
+            if (MAPS[k].pressed && MAPS[k].release_pending) {
+                long long stable = release_stable_ms_for_offset(MAPS[k].offset);
+                if (now - MAPS[k].rise_candidate_ms >= stable) {
+                    MAPS[k].pressed = 0;
+                    MAPS[k].release_pending = 0;
+                    if (debug) { fprintf(stdout, "RELEASE OK %u\n", MAPS[k].offset); fflush(stdout); }
+                }
+            }
+        }
+
+        if (pr < 0) { if (errno == EINTR) continue; perror("poll"); break; }
+        if (pr == 0) continue;
+
+        int rd = gpiod_line_request_read_edge_events(req, buf, MAX_EVENTS);
         if (rd < 0) { perror("read_edge_events"); continue; }
 
         for (int i = 0; i < rd; i++) {
-            const struct gpiod_edge_event *ev = gpiod_edge_event_buffer_get_event(buf, i);
+            // libgpiod headers use non-const pointer for getters; cast to avoid warnings
+            struct gpiod_edge_event *ev =
+                (struct gpiod_edge_event *)gpiod_edge_event_buffer_get_event(buf, i);
+
             unsigned int off = gpiod_edge_event_get_line_offset(ev);
             enum gpiod_edge_event_type et = gpiod_edge_event_get_event_type(ev);
             long long t = now_ms();
@@ -216,6 +254,9 @@ int main(int argc, char **argv) {
                 if (t - MAPS[idx].last_fall_ms < DEBOUNCE_FALL_MS) continue;
                 MAPS[idx].last_fall_ms = t;
 
+                // If we were verifying a release, cancel it (noise produced a fake rise)
+                MAPS[idx].release_pending = 0;
+
                 if (!MAPS[idx].pressed) {
                     MAPS[idx].pressed = 1;
                     MAPS[idx].pressed_ms = t;
@@ -226,17 +267,21 @@ int main(int argc, char **argv) {
                     if (debug) { fprintf(stdout, "FALL ignored (pressed) %u\n", off); fflush(stdout); }
                 }
             } else if (et == GPIOD_EDGE_EVENT_RISING_EDGE) {
-                // Release: ignore too-fast rise right after press (bounce)
                 if (MAPS[idx].pressed) {
+                    // Ignore too-fast rise right after press (bounce)
                     if (t - MAPS[idx].pressed_ms < MIN_PRESS_MS) {
                         if (debug) { fprintf(stdout, "RISE ignored (bounce) %u\n", off); fflush(stdout); }
                         continue;
                     }
+
                     if (t - MAPS[idx].last_rise_ms < DEBOUNCE_RISE_MS) continue;
                     MAPS[idx].last_rise_ms = t;
 
-                    MAPS[idx].pressed = 0;
-                    if (debug) { fprintf(stdout, "RISE %u (release)\n", off); fflush(stdout); }
+                    // Start release verification (do NOT set pressed=0 immediately)
+                    MAPS[idx].release_pending = 1;
+                    MAPS[idx].rise_candidate_ms = t;
+
+                    if (debug) { fprintf(stdout, "RISE candidate %u\n", off); fflush(stdout); }
                 } else {
                     if (debug) { fprintf(stdout, "RISE ignored (released) %u\n", off); fflush(stdout); }
                 }
